@@ -1,0 +1,17 @@
+{
+  "name": "VoxEPUB - Lector Premium con Voz",
+  "short_name": "VoxEPUB",
+  "description": "Lector EPUB con voces neuronales offline y temas personalizados.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

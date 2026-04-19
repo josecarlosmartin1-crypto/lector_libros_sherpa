@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>eReader con Voz (TTS)</title>
+    <!-- Usamos tipografía inter para darle un toque premium -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css?v=13">
+    
+    <!-- PWA y Mobile Meta -->
+    <meta name="theme-color" content="#0f172a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" href="icon.png">
+    <link rel="apple-touch-icon" href="icon.png">
+
+    <!-- Librerías Externas -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
+</head>
+<body>
+    <div id="pantalla-inicio" class="pantalla activa">
+        <div class="carga-container">
+            <h1 class="logo">Vox<span>EPUB</span></h1>
+            <p class="subtitle">Aprende pronunciación leyendo tus libros favoritos.</p>
+            
+            <div class="glass-panel">
+                <input type="file" id="file-input" accept=".epub" hidden />
+                <button id="btn-elegir-libro" class="btn-primary">
+                    <span class="icon">📚</span> Cargar Nuevo Libro
+                </button>
+                <div id="reanudar-contenedor" class="hidden">
+                    <p class="small-text">O reanuda tu última lectura:</p>
+                    <button id="btn-reanudar" class="btn-secondary">
+                        Reanudar <span id="nombre-libro-guardado"></span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="pantalla-lector" class="pantalla hidden">
+        <div class="top-bar">
+            <button id="btn-volver" class="icon-btn" title="Volver al inicio">←</button>
+            <div class="book-info">
+                <div id="titulo-libro" class="titulo-small">Cargando...</div>
+                <div id="progreso-pagina" class="progreso-text">Pag -- / --</div>
+            </div>
+            <div id="timer-display" class="timer-badge hidden">--:--</div>
+            <div id="tts-status" class="tts-badge">Iniciando Voz...</div>
+            <button id="btn-settings" class="icon-btn" title="Ajustes">⚙️</button>
+        </div>
+
+        <div id="progress-download-container" class="download-container hidden">
+            <p>Descargando Modelo de Voz (50MB)...</p>
+            <div class="progress-bg">
+                <div id="progress-download-bar" class="progress-bar"></div>
+            </div>
+        </div>
+
+        <!-- Ajustes Flotantes -->
+        <div id="panel-settings" class="panel-flotante hidden">
+            <div class="setting-row">
+                <label>Tema Lector:</label>
+                <select id="select-tema" class="styled-select">
+                    <option value="light">Día (Blanco)</option>
+                    <option value="sepia">Sepia (Crema)</option>
+                    <option value="dark">Noche (Oscuro)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label>Idioma Voz:</label>
+                <select id="select-idioma" class="styled-select">
+                    <option value="es-ES">Español (Piper)</option>
+                    <option value="en-GB">Inglés UK (Piper)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label>Temporizador:</label>
+                <select id="select-timer" class="styled-select">
+                    <option value="0">Apagado</option>
+                    <option value="15">15 minutos</option>
+                    <option value="30">30 minutos</option>
+                    <option value="45">45 minutos</option>
+                    <option value="60">60 minutos</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label>Velocidad:</label>
+                <input type="range" id="rango-velocidad" min="0.5" max="2.0" step="0.1" value="1.0">
+                <span id="valor-velocidad">1.0x</span>
+            </div>
+        </div>
+
+        <div id="viewer" class="viewer-container">
+            <!-- Epub.js inserta los iframes aquí -->
+        </div>
+
+        <div class="controls-overlay">
+            <button id="btn-prev" class="nav-control nav-left">❮</button>
+            <button id="btn-next" class="nav-control nav-right">❯</button>
+        </div>
+
+        <div class="bottom-bar">
+            <div id="progress-container">
+                <input type="range" id="book-slider" class="book-slider" min="0" max="100" value="0" step="0.1">
+            </div>
+            <div class="play-controls">
+                <button id="btn-play" class="btn-circular action-play">▶️</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="tts-manager.js?v=14"></script>
+    <script src="main.js?v=14"></script>
+    <script>
+        // Registrar Service Worker para PWA
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(reg => console.log('SW registrado:', reg.scope))
+                    .catch(err => console.log('Error SW:', err));
+            });
+        }
+    </script>
+</body>
+</html>
