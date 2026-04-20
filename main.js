@@ -5,7 +5,12 @@ let book = null;
 let rendition = null;
 let currCfi = null;
 let tituloGuardado = "";
+let currentParagraphs = [];
+let currentPIndex = -1;
+let currentPChunks = [];    // NUEVO: fragmentos del párrafo actual
+let currentChunkIndex = 0;  // NUEVO: índice del fragmento actual
 let isReading = false;
+let isAutoReading = true; // Controlar si debe saltar al siguiente automáticamente
 let currentUtterance = null;
 let ttsRate = 1.0;
 let ttsLang = "es-ES";
@@ -255,8 +260,6 @@ function aplicarTema(tema) {
 }
 
 // LOGICA EPUB.JS
-let currentParagraphs = [];
-let currentPIndex = -1;
 let currentHighlight = null;
 
 function cargarLibro(bookData, titulo) {
@@ -321,29 +324,26 @@ function cargarLibro(bookData, titulo) {
     // Usamos el hook nativo de epubjs que se dispara exactamente 1 vez por cada marco (iframe) que monta 
     rendition.hooks.content.register((contents) => {
         const doc = contents.document;
-        // Solo elementos que contienen texto y NO anidan otro bloque idéntico para evitar lectura doble (Ej: li con un p dentro)
-        const blocks = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li'));
+        // Solo elementos que contienen texto y NO anidan otro bloque idéntico
+        const blocks = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li'))
+            .filter(el => !el.querySelector('p, h1, h2, h3, h4, h5, h6, li'));
+
+        // RECOLECTAR EL CAPÍTULO
+        currentParagraphs = blocks;
         
-        blocks.forEach((p) => {
-            // Filtro protector: si este bloque contiene otro bloque válido por debajo, lo ignoramos para leer solo el más interno.
-            if(!p.querySelector('p, h1, h2, h3, h4, h5, h6, li')) {
-                p.style.cursor = "pointer";
-                // Limpiar urls web sueltas si en la epub solo era spam de texto (opcional si es muy molesto)
+        blocks.forEach((p, idx) => {
+            p.style.cursor = "pointer";
+            p.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (isReading) stopTts();
                 
-                p.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (isReading) stopTts();
-                    
-                    // Cuando tocamos un texto, capturamos todo el DOM de ESE iframe en particular para que la lectura sea lineal
-                    currentParagraphs = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li')).filter(el => !el.querySelector('p, h1, h2, h3, h4, h5, h6, li'));
-                    currentPIndex = currentParagraphs.indexOf(p);
-                    
-                    if(currentPIndex !== -1) {
-                        setTimeout(() => startTts(), 100);
-                    }
-                });
-            }
+                currentPIndex = idx;
+                currentPChunks = []; // Forzar re-segmentación al empezar
+                currentChunkIndex = 0;
+                
+                startTts();
+            });
         });
     });
 
@@ -425,6 +425,8 @@ function toggleTts() {
 
 function stopTts() {
     isReading = false;
+    currentPChunks = [];
+    currentChunkIndex = 0;
     window.ttsManager.stop();
     UI.btnPlay.innerHTML = "▶️";
     UI.btnPlay.classList.remove('reading');
@@ -439,23 +441,21 @@ function stopTts() {
 }
 
 async function startTts() {
-    window.ttsManager.stop();
+    if (isReading) return;
     
     // Si dimos a play y la memoria está vacía, calculamos de qué iframe debemos sacar el texto
-    if (currentPIndex === -1 || currentParagraphs.length === 0) {
+    if (currentParagraphs.length === 0) {
         if(!rendition) return;
         const activeContents = rendition.getContents();
         if(activeContents && activeContents.length > 0) {
-            const doc = activeContents[0].document; // Obtenemos el iframe en pantalla
+            const doc = activeContents[0].document;
             currentParagraphs = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li'))
-                .filter(el => !el.querySelector('p, h1, h2, h3, h4, h5, h6, li')); // Doble protección nidos
-            
-            // Asignar bloque 0 para evitar fallos si scrollearon por encima
+                .filter(el => !el.querySelector('p, h1, h2, h3, h4, h5, h6, li'));
             currentPIndex = 0;
         }
     }
-
-    if (!currentParagraphs || currentParagraphs.length === 0) return; // Seguimos sin datos visuales, aborta
+    
+    if (currentPIndex === -1) currentPIndex = 0;
 
     if (!window.ttsManager.isModelLoaded) {
         alert("Cargando motor de voz... Espera un momento.");
@@ -468,26 +468,26 @@ async function startTts() {
     
     await solicitarWakeLock();
     
-    setTimeout(() => readNextParagraph(), 50);
+    readNextParagraph();
 }
 
 function readNextParagraph() {
     if (!isReading) return;
     
+    // 1. Verificar si hemos terminado el capítulo
     if (currentPIndex >= currentParagraphs.length) {
-        // Reseteo extremo de variables locales para prevenir carreras (Jump de múltiples capítulos)
-        let isAutoReading = isReading;
-        stopTts(); 
-        currentParagraphs = [];
-        currentPIndex = -1;
-        
-        rendition.next().then(() => {
-            setTimeout(() => { 
-                if (isAutoReading) {
-                    startTts(); // Iniciar calculará el activeContents desde 0 de forma segura
-                }
-            }, 1000); 
-        });
+        if (rendition) {
+            rendition.next().then(() => {
+                setTimeout(() => { 
+                    if (isAutoReading) {
+                        currentPIndex = 0;
+                        currentPChunks = [];
+                        currentChunkIndex = 0;
+                        startTts(); 
+                    }
+                }, 1000); 
+            });
+        }
         return;
     }
     
@@ -498,73 +498,132 @@ function readNextParagraph() {
         return;
     }
 
-    // Exclusión de hipervínculos web basura muy pesados o vacíos inútiles
-    let text = p.innerText.trim();
-    if (text.startsWith("www.") || text.startsWith("http")) { // Ignorar encriptado basurilla
-        text = "";
+    // 2. SEGMENTACIÓN BAJO DEMANDA
+    if (currentPChunks.length === 0 || currentChunkIndex >= currentPChunks.length) {
+        let textToSplit = p.textContent || "";
+        currentPChunks = segmentarTexto(textToSplit, 140);
+        currentChunkIndex = 0;
+        
+        // Resaltado Visual
+        if (currentHighlight) currentHighlight.style.backgroundColor = "transparent";
+        p.style.backgroundColor = "rgba(234, 179, 8, 0.4)";
+        currentHighlight = p;
+        p.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        
+        // Actualizar Memoria
+        try {
+            const contents = rendition.getContents()[0];
+            if (contents) {
+                const pCfi = contents.cfiFromNode(p);
+                if (pCfi) {
+                    currCfi = pCfi;
+                    localStorage.setItem('currentCFI', currCfi);
+                    actualizarProgresoUI();
+                }
+            }
+        } catch(e) {}
     }
 
-    if (text.length < 2) { 
-        currentPIndex++;
+    // 3. Obtener el trozo actual
+    const text = currentPChunks[currentChunkIndex].trim();
+    
+    if (text.length < 1 || text.startsWith("www.") || text.startsWith("http")) {
+        currentChunkIndex++;
         setTimeout(() => readNextParagraph(), 10);
         return;
     }
     
-    // Resaltado Visual
-    if (currentHighlight) currentHighlight.style.backgroundColor = "transparent";
-    p.style.backgroundColor = "rgba(234, 179, 8, 0.4)";
-    currentHighlight = p;
-    p.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    
-    // Actualizar Memoria
-    try {
-        const contents = rendition.getContents()[0];
-        if (contents) {
-            const pCfi = contents.cfiFromNode(p);
-            if (pCfi) {
-                currCfi = pCfi;
-                localStorage.setItem('currentCFI', currCfi);
-                actualizarProgresoUI();
-            }
-        }
-    } catch(e) {}
-    
-    // Locución Offline con look-ahead
+    // 4. Locución (Con look-ahead restaurado, ahora seguro vía Worker)
     const speakSuccess = window.ttsManager.speak(text, ttsRate, () => {
         if(isReading) {
-            currentPIndex++;
-            readNextParagraph();
+            currentChunkIndex++;
+            if (currentChunkIndex >= currentPChunks.length) {
+                // SALTO DE PÁRRAFO: Pausa de medio segundo para mejor comprensión
+                currentPIndex++;
+                currentPChunks = [];
+                currentChunkIndex = 0;
+                setTimeout(() => {
+                    if (isReading) readNextParagraph();
+                }, 550); // 500ms + pequeño margen de seguridad
+            } else {
+                // MISMO PÁRRAFO: Continuación fluida
+                readNextParagraph();
+            }
         }
     });
 
-    // Si el motor falla, detenemos la lectura
+    // Look-ahead inteligente: pre-generar el SIGUIENTE trozo mientras suena el actual
+    if (speakSuccess) {
+        setTimeout(() => {
+            if (!isReading) return;
+            let nextChunk = currentChunkIndex + 1;
+            let nextP = currentPIndex;
+            
+            // Si hay un siguiente trozo en este párrafo
+            if (nextChunk < currentPChunks.length) {
+                window.ttsManager.pregenerate(currentPChunks[nextChunk], ttsRate);
+            } else if (nextP + 1 < currentParagraphs.length) {
+                // Si no, pre-generar el primer trozo del siguiente párrafo
+                const nextText = currentParagraphs[nextP + 1].textContent || "";
+                const nextFragments = segmentarTexto(nextText, 140);
+                if (nextFragments.length > 0) {
+                    window.ttsManager.pregenerate(nextFragments[0], ttsRate);
+                }
+            }
+        }, 300);
+    }
+
     if (speakSuccess === false) {
         console.warn("Fallo al iniciar locución, deteniendo lectura.");
         stopTts();
         return;
     }
-
-    // Look-ahead: pre-generar el SIGUIENTE párrafo mientras éste suena
-    // El timeout de 150ms da tiempo a que el audio empiece y el hilo esté libre
-    setTimeout(() => {
-        if (!isReading) return;
-        let nextIdx = currentPIndex + 1;
-        // Buscar el siguiente párrafo válido (saltar los vacíos)
-        while (nextIdx < currentParagraphs.length) {
-            const nextEl = currentParagraphs[nextIdx];
-            if (nextEl) {
-                const nextText = nextEl.innerText.trim();
-                if (nextText.length >= 2 && !nextText.startsWith("www.") && !nextText.startsWith("http")) {
-                    window.ttsManager.pregenerate(nextText, ttsRate);
-                    break;
-                }
-            }
-            nextIdx++;
-        }
-    }, 150);
 }
 
 // Utilidades UI
+// Utilidad para dividir párrafos largos en fragmentos naturales
+function segmentarTexto(texto, limite = 140) {
+    if (!texto || texto.length <= limite) return [texto || ""];
+    
+    // Intentar dividir por oraciones (. ! ?) seguidas de espacio
+    const fragmentos = [];
+    let textoRestante = texto;
+    
+    while (textoRestante.length > limite) {
+        // Buscar el último punto/exclamación dentro del límite
+        let subTexto = textoRestante.substring(0, limite);
+        let ultimoPunto = Math.max(
+            subTexto.lastIndexOf('. '), 
+            subTexto.lastIndexOf('! '), 
+            subTexto.lastIndexOf('? '),
+            subTexto.lastIndexOf('.\n')
+        );
+        
+        // Si no hay puntos, buscar una coma
+        if (ultimoPunto === -1) {
+            ultimoPunto = subTexto.lastIndexOf(', ');
+        }
+        
+        // Si no hay comas, buscar un espacio
+        if (ultimoPunto === -1) {
+            ultimoPunto = subTexto.lastIndexOf(' ');
+        }
+        
+        // Si no hay ni espacios (palabra gigante), cortar rudo
+        if (ultimoPunto === -1) {
+            ultimoPunto = limite;
+        } else {
+            ultimoPunto += 1; // Incluir el signo o espacio
+        }
+        
+        fragmentos.push(textoRestante.substring(0, ultimoPunto).trim());
+        textoRestante = textoRestante.substring(ultimoPunto).trim();
+    }
+    
+    if (textoRestante) fragmentos.push(textoRestante);
+    return fragmentos;
+}
+
 function mostrarPantalla(id) {
     Object.values(PANTALLAS).forEach(p => {
         p.classList.add('hidden');
