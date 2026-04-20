@@ -474,16 +474,16 @@ async function startTts() {
 function readNextParagraph() {
     if (!isReading) return;
     
-    // 1. Verificar si hemos terminado el capítulo
+    // 1. ¿Necesitamos cargar un nuevo párrafo o saltar de capítulo?
     if (currentPIndex >= currentParagraphs.length) {
         if (rendition) {
             rendition.next().then(() => {
                 setTimeout(() => { 
-                    if (isAutoReading) {
+                    if (isAutoReading && isReading) {
                         currentPIndex = 0;
                         currentPChunks = [];
                         currentChunkIndex = 0;
-                        startTts(); 
+                        readNextParagraph(); 
                     }
                 }, 1000); 
             });
@@ -494,23 +494,23 @@ function readNextParagraph() {
     const p = currentParagraphs[currentPIndex];
     if (!p) {
         currentPIndex++;
-        setTimeout(() => readNextParagraph(), 10);
+        readNextParagraph();
         return;
     }
 
-    // 2. SEGMENTACIÓN BAJO DEMANDA
+    // 2. ¿Necesitamos segmentar el párrafo actual?
     if (currentPChunks.length === 0 || currentChunkIndex >= currentPChunks.length) {
         let textToSplit = p.textContent || "";
         currentPChunks = segmentarTexto(textToSplit, 140);
         currentChunkIndex = 0;
         
-        // Resaltado Visual
+        // Resaltado Visual y Scroll
         if (currentHighlight) currentHighlight.style.backgroundColor = "transparent";
         p.style.backgroundColor = "rgba(234, 179, 8, 0.4)";
         currentHighlight = p;
         p.scrollIntoView({ behavior: 'smooth', block: 'center' });
         
-        // Actualizar Memoria
+        // Guardar Posición
         try {
             const contents = rendition.getContents()[0];
             if (contents) {
@@ -524,59 +524,45 @@ function readNextParagraph() {
         } catch(e) {}
     }
 
-    // 3. Obtener el trozo actual
+    // 3. Obtener fragmento actual
     const text = currentPChunks[currentChunkIndex].trim();
     
-    if (text.length < 1 || text.startsWith("www.") || text.startsWith("http")) {
+    if (text.length < 1) {
         currentChunkIndex++;
-        setTimeout(() => readNextParagraph(), 10);
+        readNextParagraph();
         return;
     }
     
-    // 4. Locución (Con look-ahead restaurado, ahora seguro vía Worker)
+    // 4. Locución con Callback de "Siguiente"
     const speakSuccess = window.ttsManager.speak(text, ttsRate, () => {
-        if(isReading) {
-            currentChunkIndex++;
-            if (currentChunkIndex >= currentPChunks.length) {
-                // SALTO DE PÁRRAFO: Pausa de medio segundo para mejor comprensión
-                currentPIndex++;
-                currentPChunks = [];
-                currentChunkIndex = 0;
-                setTimeout(() => {
-                    if (isReading) readNextParagraph();
-                }, 550); // 500ms + pequeño margen de seguridad
-            } else {
-                // MISMO PÁRRAFO: Continuación fluida
-                readNextParagraph();
-            }
+        if (!isReading) return;
+
+        currentChunkIndex++;
+        
+        // ¿Hemos terminado este párrafo?
+        if (currentChunkIndex >= currentPChunks.length) {
+            currentPIndex++;
+            currentPChunks = [];
+            currentChunkIndex = 0;
+            // PAUSA NATURAL antes del siguiente párrafo
+            setTimeout(() => {
+                if (isReading) readNextParagraph();
+            }, 550);
+        } else {
+            // Siguiente fragmento del mismo párrafo (sin pausa)
+            readNextParagraph();
         }
     });
 
-    // Look-ahead inteligente: pre-generar el SIGUIENTE trozo mientras suena el actual
+    // Look-ahead silencioso para pre-cargar el buffer
     if (speakSuccess) {
         setTimeout(() => {
             if (!isReading) return;
-            let nextChunk = currentChunkIndex + 1;
-            let nextP = currentPIndex;
-            
-            // Si hay un siguiente trozo en este párrafo
-            if (nextChunk < currentPChunks.length) {
-                window.ttsManager.pregenerate(currentPChunks[nextChunk], ttsRate);
-            } else if (nextP + 1 < currentParagraphs.length) {
-                // Si no, pre-generar el primer trozo del siguiente párrafo
-                const nextText = currentParagraphs[nextP + 1].textContent || "";
-                const nextFragments = segmentarTexto(nextText, 140);
-                if (nextFragments.length > 0) {
-                    window.ttsManager.pregenerate(nextFragments[0], ttsRate);
-                }
+            let nNext = currentChunkIndex + 1;
+            if (nNext < currentPChunks.length) {
+                window.ttsManager.pregenerate(currentPChunks[nNext], ttsRate);
             }
-        }, 300);
-    }
-
-    if (speakSuccess === false) {
-        console.warn("Fallo al iniciar locución, deteniendo lectura.");
-        stopTts();
-        return;
+        }, 200);
     }
 }
 

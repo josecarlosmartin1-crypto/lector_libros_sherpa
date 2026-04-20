@@ -1,4 +1,4 @@
-// tts-manager.js - Gestor Inteligente V5
+// tts-manager.js - Gestor de Estabilidad V5.2
 
 class TTSManager {
     constructor() {
@@ -19,127 +19,118 @@ class TTSManager {
         this.audioContext = null;
         this.currentSource = null;
         
-        this.isWorkerBooted = false; // El script del worker ha arrancado
-        this.isWasmReady = false;    // El motor WASM está listo
+        this.isWorkerBooted = false;
+        this.isWasmReady = false;
         this.isModelLoaded = false;
         this.currentLang = null;
         
         this._pendingSpeak = null;
         this._pregeneratedAudios = new Map();
-        this._messageQueue = []; // Cola de mensajes mientras carga el worker
+        this._messageQueue = [];
+        this._requestIdCounter = 0;
 
         this.initWorker();
     }
 
     initWorker() {
-        if (this.worker) {
-            this.worker.terminate();
-        }
-
-        console.log("TTS Manager: Inicializando Web Worker...");
+        if (this.worker) this.worker.terminate();
         this.worker = new Worker('./tts-worker.js?v=' + Date.now());
         
         this.worker.onmessage = (e) => {
-            const { type, samples, sampleRate, text, lang, message } = e.data;
+            const { type, samples, sampleRate, text, lang, message, progress, requestId } = e.data;
 
             switch (type) {
                 case 'worker_started':
-                    console.log("TTS Manager: Worker ha arrancado.");
                     this.isWorkerBooted = true;
                     break;
                 case 'wasm_ready':
-                    console.log("TTS Manager: WASM listo en el Worker.");
                     this.isWasmReady = true;
                     this.processQueue();
                     break;
+                case 'download_progress':
+                    this.updateProgressUI(progress);
+                    break;
                 case 'model_loaded':
-                    console.log(`TTS Manager: Modelo ${lang} cargado.`);
                     this.isModelLoaded = true;
                     this.updateStatusBadge(lang);
                     break;
                 case 'generate_done':
-                    this.handleWorkerAudio(samples, sampleRate, text);
+                    this.handleWorkerAudio(samples, sampleRate, text, requestId);
                     break;
                 case 'error':
-                    console.error("TTS Manager Error de Worker:", message);
+                    console.error("TTS Error:", message);
                     this.handleError(message);
                     break;
             }
         };
-
-        this.worker.onerror = (err) => {
-            console.error("TTS Manager: Fallo crítico de Worker:", err);
-            this.handleError("Fallo de arranque del Worker");
-        };
     }
 
-    processQueue() {
-        console.log(`TTS Manager: Procesando cola de espera (${this._messageQueue.length} mensajes)...`);
-        while (this._messageQueue.length > 0) {
-            const msg = this._messageQueue.shift();
-            this.worker.postMessage(msg);
-        }
-    }
-
-    handleError(msg) {
+    updateProgressUI(percent) {
         const statusBadge = document.getElementById('tts-status');
         if (statusBadge) {
-            statusBadge.innerHTML = `<span style="color:#ef4444;">●</span> Error: ${msg.substring(0, 15)}...`;
+            statusBadge.style.setProperty('--download-progress', `${percent}%`);
+            statusBadge.innerHTML = `<span class="spinner"></span> Cargando... ${percent}%`;
+            statusBadge.classList.add('loading');
         }
     }
 
     updateStatusBadge(lang) {
         const statusBadge = document.getElementById('tts-status');
         if (statusBadge) {
+            statusBadge.classList.remove('loading');
+            statusBadge.style.setProperty('--download-progress', `100%`);
             statusBadge.innerHTML = `<span style="color:#22c55e;">●</span> Listo (${lang})`;
             statusBadge.classList.add('ready');
         }
     }
 
+    handleError(msg) {
+        const statusBadge = document.getElementById('tts-status');
+        if (statusBadge) {
+            statusBadge.innerHTML = `<span style="color:#ef4444;">●</span> Error Voz`;
+            statusBadge.classList.remove('loading');
+        }
+    }
+
+    processQueue() {
+        while (this._messageQueue.length > 0) {
+            this.worker.postMessage(this._messageQueue.shift());
+        }
+    }
+
     async loadModel(lang) {
         if (this.isModelLoaded && this.currentLang === lang) return true;
-        
         this.currentLang = lang;
         this.isModelLoaded = false;
         
         const modelInfo = this.models[lang];
         if (!modelInfo) return false;
 
-        const statusBadge = document.getElementById('tts-status');
-        if (statusBadge) statusBadge.innerText = 'Cargando Voz...';
-
         const msg = {
             type: 'load_model',
-            data: {
-                lang,
-                onnxUrl: modelInfo.onnxUrl,
-                tokensUrl: modelInfo.tokensUrl
-            }
+            data: { lang, onnxUrl: modelInfo.onnxUrl, tokensUrl: modelInfo.tokensUrl }
         };
 
         if (this.isWasmReady) {
             this.worker.postMessage(msg);
         } else {
-            console.log("TTS Manager: WASM no listo, encolando carga de modelo...");
             this._messageQueue.push(msg);
         }
-        
         return true;
     }
 
-    handleWorkerAudio(samples, sampleRate, text) {
-        if (!this.audioContext) {
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        }
-
+    handleWorkerAudio(samples, sampleRate, text, requestId) {
+        if (!this.audioContext) this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const buffer = this.audioContext.createBuffer(1, samples.length, sampleRate);
         buffer.getChannelData(0).set(samples);
 
-        if (this._pendingSpeak && this._pendingSpeak.text === text) {
+        // Si este audio es el que estamos esperando para sonar YA
+        if (this._pendingSpeak && this._pendingSpeak.requestId === requestId) {
             const callback = this._pendingSpeak.onEnd;
             this._pendingSpeak = null;
             this.playBuffer(buffer, callback);
         } else {
+            // Si no, lo guardamos en la recámara (look-ahead)
             this._pregeneratedAudios.set(text, buffer);
         }
     }
@@ -155,37 +146,29 @@ class TTSManager {
             return true;
         }
 
-        this._pendingSpeak = { text, onEnd: onEndCallback };
-        this.worker.postMessage({
-            type: 'generate',
-            data: { text, rate }
-        });
+        const requestId = ++this._requestIdCounter;
+        this._pendingSpeak = { text, onEnd: onEndCallback, requestId };
+        this.worker.postMessage({ type: 'generate', data: { text, rate, requestId } });
         return true;
     }
 
     pregenerate(text, rate = 1.0) {
         if (!this.isModelLoaded || !text || text.length < 2) return;
         if (this._pregeneratedAudios.has(text)) return;
-
-        this.worker.postMessage({
-            type: 'generate',
-            data: { text, rate }
-        });
+        
+        const requestId = ++this._requestIdCounter;
+        this.worker.postMessage({ type: 'generate', data: { text, rate, requestId } });
     }
 
     async playBuffer(buffer, onEndCallback) {
-        if (!this.audioContext) {
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (this.audioContext.state === 'suspended') {
-            await this.audioContext.resume();
-        }
-
+        if (!this.audioContext) this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        if (this.audioContext.state === 'suspended') await this.audioContext.resume();
+        
         const source = this.audioContext.createBufferSource();
         source.buffer = buffer;
         source.connect(this.audioContext.destination);
-        this.currentSource = source;
         
+        this.currentSource = source;
         source.onended = () => {
             if (this.currentSource === source) {
                 this.currentSource = null;

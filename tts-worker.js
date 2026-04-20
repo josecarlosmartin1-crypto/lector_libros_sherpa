@@ -1,13 +1,11 @@
-// tts-worker.js - Arquitectura Robusta V5
+// tts-worker.js - Arquitectura Robusta V5.1 (Con Progreso)
 
-// 1. Captura de errores temprana
 self.onerror = function(msg, url, line, col, error) {
     postMessage({ type: 'error', message: `Worker Error: ${msg} en ${line}:${col}` });
     return false;
 };
 
 try {
-    // Importar dependencias
     importScripts('https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js');
 
     let Module = null;
@@ -15,7 +13,6 @@ try {
     let currentLang = null;
     let isWasmLoaded = false;
 
-    // Configuración de Emscripten para el Worker
     self.Module = {
         locateFile: (path) => {
             if (path.endsWith('.wasm')) return 'sherpa-onnx-wasm-main-tts.wasm';
@@ -30,21 +27,15 @@ try {
         }
     };
 
-    // Cargar scripts del motor (sin ./ para mayor compatibilidad)
     importScripts('sherpa-onnx-wasm-main-tts.js');
     importScripts('sherpa-onnx-tts.js');
-
-    // Avisar que el Worker ha arrancado al menos
     postMessage({ type: 'worker_started' });
 
-    // Escuchar peticiones del hilo principal
     self.onmessage = async (e) => {
         const { type, data } = e.data;
-
         switch (type) {
             case 'load_model':
                 if (!isWasmLoaded) {
-                    // Si el mensaje llega antes que el WASM esté listo, esperar un poco
                     let checkCount = 0;
                     while (!isWasmLoaded && checkCount < 20) {
                         await new Promise(r => setTimeout(r, 500));
@@ -63,9 +54,9 @@ try {
         try {
             currentLang = lang;
             
-            // Descarga/Caché
-            const onnxBuffer = await fetchAndCache(onnxUrl, lang, 'onnx');
-            const tokensBuffer = await fetchAndCache(tokensUrl, lang, 'tokens');
+            // Solo reportamos progreso para el ONNX que es el pesado (~50MB)
+            const onnxBuffer = await fetchAndCache(onnxUrl, lang, 'onnx', true);
+            const tokensBuffer = await fetchAndCache(tokensUrl, lang, 'tokens', false);
 
             const onnxFile = `model_${lang}.onnx`;
             const tokensFile = `tokens_${lang}.txt`;
@@ -102,10 +93,7 @@ try {
     }
 
     function handleGenerate({ text, rate, requestId }) {
-        if (!engine) {
-            postMessage({ type: 'error', message: "Motor no inicializado para generate" });
-            return;
-        }
+        if (!engine) return;
         try {
             const audioObj = engine.generate({ text, sid: 0, speed: rate });
             if (audioObj && audioObj.samples) {
@@ -123,7 +111,7 @@ try {
         }
     }
 
-    async function fetchAndCache(url, lang, type) {
+    async function fetchAndCache(url, lang, type, reportProgress = false) {
         const urlParts = url.split('/');
         const fileName = urlParts[urlParts.length - 1];
         const cacheKey = `tts_v5_${lang}_${type}_${fileName}`;
@@ -132,9 +120,44 @@ try {
         if (!data) {
             console.log(`Worker: Descargando ${type} para ${lang}...`);
             const response = await fetch(url);
-            if (!response.ok) throw new Error(`HTTP ${response.status} al descargar ${url}`);
-            data = await response.arrayBuffer();
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            
+            if (!reportProgress) {
+                data = await response.arrayBuffer();
+            } else {
+                // Lógica de progreso manual con ReadableStream
+                const contentLength = response.headers.get('content-length');
+                const total = parseInt(contentLength, 10);
+                let loaded = 0;
+                
+                const reader = response.body.getReader();
+                const chunks = [];
+                
+                while(true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    loaded += value.length;
+                    
+                    if (total) {
+                        const progress = Math.round((loaded / total) * 100);
+                        postMessage({ type: 'download_progress', progress, lang });
+                    }
+                }
+                
+                const combined = new Uint8Array(loaded);
+                let pos = 0;
+                for (let chunk of chunks) {
+                    combined.set(chunk, pos);
+                    pos += chunk.length;
+                }
+                data = combined.buffer;
+            }
+            
             await localforage.setItem(cacheKey, data);
+        } else if (reportProgress) {
+            // Si ya estaba en caché, avisar que está al 100% de inmediato
+            postMessage({ type: 'download_progress', progress: 100, lang });
         }
         return data;
     }
