@@ -393,7 +393,7 @@ button:active {
 /* Estilos de TTS y Descargas (Consolidados) */
 .tts-badge {
     position: fixed;
-    bottom: 85px;
+    bottom: 22px; /* Centrado vertical en la barra de 80px */
     right: 15px;
     z-index: 1000;
     
